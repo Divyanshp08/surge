@@ -67,10 +67,17 @@ function isGir(h: Hostel) {
 function isKaziranga(h: Hostel) {
   return ["kazi", "kaziranga"].includes(h.name.toLowerCase());
 }
+function normalizeName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
 
+function normalizePhone(value: string) {
+  return value.replace(/\s+/g, "");
+}
 export default function CheckInPage() {
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<Player[]>([]);
+  const [duplicatePlayers, setDuplicatePlayers] = useState<Player[]>([]);
   const [player, setPlayer] = useState<Player | null>(null);
   const [hostels, setHostels] = useState<Hostel[]>([]);
   const [allocations, setAllocations] = useState<Allocation[]>([]);
@@ -172,6 +179,34 @@ export default function CheckInPage() {
 
     setResults((data ?? []) as Player[]);
   }
+  async function findDuplicatePlayers(name: string, phone: string) {
+  const normalizedName = normalizeName(name);
+  const normalizedPhone = normalizePhone(phone);
+
+  setDuplicatePlayers([]);
+
+  if (!normalizedName || !normalizedPhone) {
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("players")
+    .select(
+      "id, player_name, college, sports, phone, role, gender, security_deposit"
+    )
+    .eq("phone", normalizedPhone);
+
+  if (error) {
+    setError(`Could not check for duplicate players: ${error.message}`);
+    return;
+  }
+
+  const matches = ((data ?? []) as Player[]).filter(
+    (p) => normalizeName(p.player_name) === normalizedName
+  );
+
+  setDuplicatePlayers(matches);
+}
 
   async function selectPlayer(p: Player) {
     setPlayer(p);
@@ -325,7 +360,67 @@ export default function CheckInPage() {
       `Suggested hostel: ${available.name}. Review the choice and press Save Allocation to confirm.`
     );
   }
+async function savePlayerDetails() {
+  setError("");
+  setMessage("");
 
+  if (!player) {
+    setError("Select an existing participant before saving details.");
+    return;
+  }
+
+  if (!form.player_name.trim()) {
+    setError("Enter a participant name.");
+    return;
+  }
+
+  const deposit = Number(form.security_deposit);
+
+  if (!Number.isFinite(deposit) || deposit < 0) {
+    setError("Security deposit must be zero or more.");
+    return;
+  }
+
+  setSaving(true);
+
+  try {
+    const profile = {
+      player_name: form.player_name.trim(),
+      college: form.college.trim() || null,
+      sports: form.sports.trim() || null,
+      phone: form.phone.trim() || null,
+      role: form.role,
+      gender: form.gender,
+      security_deposit: deposit,
+    };
+
+    const { error: updateError } = await supabase
+      .from("players")
+      .update(profile)
+      .eq("id", player.id);
+
+    if (updateError) {
+      throw new Error(updateError.message);
+    }
+
+    setPlayer({
+      ...player,
+      ...profile,
+    });
+
+    setMessage(
+      `Participant details updated successfully for ${profile.player_name}. No hostel allocation was changed.`
+    );
+  } catch (e) {
+    setError(
+      e instanceof Error
+        ? e.message
+        : "Could not update participant details."
+    );
+  } finally {
+    setSaving(false);
+  }
+}
   async function saveAllocation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -645,7 +740,10 @@ export default function CheckInPage() {
               <input
                 required
                 value={form.player_name}
-                onChange={(e) => setForm({ ...form, player_name: e.target.value })}
+                onChange={(e) => {
+  setForm({ ...form, player_name: e.target.value });
+  setDuplicatePlayers([]);
+}}
                 className={fieldClass}
               />
             </label>
@@ -672,7 +770,10 @@ export default function CheckInPage() {
               Phone
               <input
                 value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                onChange={(e) => {
+  setForm({ ...form, phone: e.target.value });
+  setDuplicatePlayers([]);
+}}
                 className={fieldClass}
               />
             </label>
@@ -756,7 +857,74 @@ export default function CheckInPage() {
               <strong>{addDays(startDate, nights)}</strong>
             </div>
           </div>
+                <div className="mt-5">
+  <button
+    type="button"
+    onClick={() =>
+      void findDuplicatePlayers(form.player_name, form.phone)
+    }
+    disabled={!form.player_name.trim() || !form.phone.trim()}
+    className="rounded-lg bg-amber-500 px-5 py-3 font-semibold text-slate-950 disabled:opacity-50"
+  >
+    Check for Existing Participant
+  </button>
+</div>
 
+{duplicatePlayers.length > 0 && (
+  <div className="mt-5 rounded-xl border border-amber-500/50 bg-amber-950/30 p-4">
+    <h3 className="text-lg font-semibold text-amber-300">
+      This player is already registered.
+    </h3>
+
+    <p className="mt-1 text-sm text-slate-300">
+      Matching records were found using the same name and phone number.
+      Review each record before proceeding.
+    </p>
+
+    <div className="mt-4 space-y-3">
+      {duplicatePlayers.map((p) => {
+        const allocation = allocations.find(
+          (a) => a.player_id === p.id
+        );
+
+        const allocatedHostel = allocation
+          ? hostels.find((h) => h.id === allocation.hostel_id)
+          : null;
+
+        return (
+          <div
+            key={p.id}
+            className="rounded-lg border border-slate-700 bg-slate-900 p-3"
+          >
+            <p className="font-semibold">{p.player_name}</p>
+
+            <p className="text-sm text-slate-400">
+              Record ID: {p.id} · {p.college ?? "College not recorded"}
+            </p>
+
+            {allocation ? (
+              <p className="mt-2 text-sm text-emerald-300">
+                Already allocated hostel:{" "}
+                {allocatedHostel?.name ?? "Hostel not found"}
+              </p>
+            ) : (
+              <p className="mt-2 text-sm text-amber-300">
+                No active hostel allocation found.
+              </p>
+            )}
+            <button
+  type="button"
+  onClick={() => void selectPlayer(p)}
+  className="mt-3 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500"
+>
+  Select This Record to Edit
+</button>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+)}
           <div className="mt-6 border-t border-slate-800 pt-5">
             <h3 className="text-lg font-semibold">Hostel allocation</h3>
             <p className="mt-1 text-sm text-slate-400">
@@ -788,7 +956,16 @@ export default function CheckInPage() {
                 You can change the selection before saving.
               </p>
             )}
-
+{player && (
+  <button
+    type="button"
+    disabled={saving}
+    onClick={() => void savePlayerDetails()}
+    className="rounded-lg bg-amber-500 px-5 py-3 font-semibold text-slate-950 disabled:opacity-50"
+  >
+    {saving ? "Saving..." : "Save Participant Details"}
+  </button>
+)}
             <div className="mt-5 flex flex-wrap gap-3">
               <button
                 type="button"
